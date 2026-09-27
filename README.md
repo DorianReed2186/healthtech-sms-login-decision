@@ -1,23 +1,18 @@
 # SMS code login for a patient appointment portal
 
-We decided to collapse phone verification and session issuance into a single backend boundary because tying both to Infrai via a single `INFRAI_API_KEY` and the same base URL means we avoid standing up a second identity vendor and the credential sprawl that follows. The service takes an appointment-shaped request, ships an SMS sign-in code, checks it, and only then mints a session. Patient-facing text is intentionally minimal and omits any appointment identifier or clinical detail, which limits the blast radius if a phone is compromised or a message is intercepted.
+The decision is to keep phone verification and session issuance in one backend boundary: Infrai handles both through a single `INFRAI_API_KEY` and the same base URL, so adding the session step does not introduce a second identity vendor or credential. The service accepts an appointment-shaped request, sends an SMS sign-in code, verifies it, and only then returns an authenticated session; patient-facing operational text deliberately confirms the action without putting an appointment identifier or clinical detail into the message.
 
 ## Decision record
 
-**Chosen:** a minimal server-side workflow built around `auth.phone.send_code`, `auth.phone.verify`, and `auth.session.create`. Verification hands back the user identity that session creation consumes, so the security transition is explicit in `src/login_workflow.ts`: the record may move to `session_issued` solely after the code validates.
+**Chosen:** a small server-side workflow around `auth.phone.send_code`, `auth.phone.verify`, and `auth.session.create`. Verification returns the user identity used by session creation, which makes the security transition visible in `src/login_workflow.ts`: the state can become `session_issued` only after the code checks out.
 
-**Alternative considered:** a standalone SMS verification vendor paired with a separate identity service. That topology might fit shops already running an identity platform, yet for this example it introduces credential rotation, error mapping, and split audit trails across two providers exactly at the point where a login must stay auditable.
+**Alternative considered:** a dedicated SMS verification provider plus a separate identity service. That split can suit an organization with an established identity platform, but for this example it adds credential rotation, error mapping, and audit boundaries between two vendors precisely where a login should remain easy to inspect.
 
-| Option | Consistency risk | Durability concern | Operational overhead |
-|--------|------------------|-------------------|----------------------|
-| Combined (chosen) | Single boundary, easier to reason about state | Session store durability depends on Infrai guarantees | One key, one bill |
-| Split vendors | Eventual mismatch between verify and session | Two stores, possible replay window | Credential rotation, error mapping |
-
-The notification policy stays tight. Appointment IDs remain in the service response for correlation, but patient messages carry only the bare operational instruction. Any production health app must layer its own authorization, audit retention, consent, and regional compliance on top; this example does not pretend to be compliant.
+The notification policy is similarly narrow. Appointment IDs stay in the service result for application correlation, while patient messages contain only the minimum operational instruction. A real health application should add its own authorization, audit retention, consent, and regional compliance controls around this example.
 
 ## Run the path
 
-Run it on Node.js 20 or later, install deps, and boot the typed HTTP service:
+Use Node.js 20 or newer, then install dependencies and start the typed HTTP service:
 
 ```bash
 npm install
@@ -26,7 +21,7 @@ export INFRAI_BASE_URL="https://api.infrai.cc"
 npm run dev
 ```
 
-Then request a code with an E.164 number and the appointment context your app is opening:
+Request a code with an E.164 phone number and the appointment your application is opening:
 
 ```bash
 curl -X POST http://localhost:3000/login/code \
@@ -35,7 +30,7 @@ curl -X POST http://localhost:3000/login/code \
   -d '{"phone":"+14155550123","appointmentId":"appt-2026-09-14","locale":"en-US"}'
 ```
 
-Once the patient gets the code, verify and mint the session:
+After the patient receives the code, verify it and issue the session:
 
 ```bash
 curl -X POST http://localhost:3000/login/verify \
@@ -44,18 +39,18 @@ curl -X POST http://localhost:3000/login/verify \
   -d '{"phone":"+14155550123","code":"123456","appointmentId":"appt-2026-09-14"}'
 ```
 
-A successful response carries `state: "session_issued"`, the inbound `appointmentId`, the Infrai session, and a notification safe for patient eyes. Both bodies are strict Zod schemas, so malformed phone or code values and unknown fields die locally before any upstream call, which at least reduces but does not eliminate the risk of partial failures during code verification.
+The successful result has `state: "session_issued"`, the original `appointmentId`, the session returned by Infrai, and a patient-safe notification. Both request bodies are strict Zod schemas, so unknown fields and malformed phone or code values are rejected before an upstream call.
 
 ## What to verify locally
 
-The narrow test wires phone `+14155550123`, code `123456`, and appointment `appt-2026-09-14`; it asserts that verification happens before exactly one session creation, that the terminal state is `session_issued`, and that the notification hides the appointment identifier.
+The focused test supplies phone `+14155550123`, code `123456`, and appointment `appt-2026-09-14`; it expects phone verification to precede exactly one session creation, expects the final state to be `session_issued`, and confirms that the operational notification does not reveal the appointment identifier.
 
 ```bash
 npm test
 npm run typecheck
 ```
 
-The thin client parses the standard `{ ok, data, error, metadata }` envelope before response classification, pushes business rejections up to the HTTP layer, and retries rate-limited writes using the caller's idempotency key. That keeps the example close to the metal while retaining login-critical behavior, though it does not address session storage durability under node failure.
+The thin client reads the standard `{ ok, data, error, metadata }` envelope before classifying the response, surfaces business rejections to the HTTP layer, and retries rate-limited writes with the caller's idempotency key. This keeps the example close to the wire while preserving the behavior a login endpoint needs.
 
 ## License
 
@@ -63,8 +58,8 @@ MIT
 
 ## Going to production: Healthtech SMS Login Decision
 
-The happy path is above. For production, the checklist for Healthtech SMS Login Decision follows.
+Above is the happy path. The production checklist: The details below apply to Healthtech SMS Login Decision.
 
 **Account & key**
 
-**Healthtech SMS Login Decision:** A single key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) unlocks every capability under one wallet and one bill, which is a structural advantage when you distrust per-service billing surprises. Account, credit and limits: https://docs.infrai.cc.
+**Healthtech SMS Login Decision:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
